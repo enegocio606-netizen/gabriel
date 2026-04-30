@@ -1,0 +1,150 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Global Helpers ---
+    function isSignedIn() { return request.auth != null; }
+    function isVerified() { return isSignedIn() && request.auth.token.email_verified == true; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    // Enforce immutable fields
+    function isImmutable(field) { return incoming()[field] == existing()[field]; }
+    
+    function isAdmin() { 
+      return isSignedIn() && (
+        request.auth.token.email == 'enegocio606@gmail.com' ||
+        request.auth.token.email == 'atlas@system.com' ||
+        exists(/databases/$(database)/documents/authorized_emails/$(request.auth.token.email))
+      );
+    }
+
+    // --- Entity Validations ---
+    function isValidFocoFlowItem(data) {
+      return data.keys().hasAll(['uid', 'categoria', 'titulo']) &&
+             (data.uid == request.auth.uid || isAdmin()) &&
+             data.titulo is string && data.titulo.size() <= 500 &&
+             data.categoria is string &&
+             (data.get('status', 'todo') in ['todo', 'in_progress', 'done', 'active', 'completed', 'abandoned']) &&
+             (data.get('prioridade', 'medium') in ['low', 'medium', 'high']);
+    }
+
+    function isValidTransaction(data) {
+      return data.keys().hasAll(['uid', 'descricao', 'valor', 'tipo', 'data']) &&
+             (data.uid == request.auth.uid || isAdmin()) &&
+             data.descricao is string && data.descricao.size() <= 500 &&
+             data.valor is number &&
+             data.tipo in ['income', 'expense'] &&
+             data.data is number;
+    }
+
+    // --- Collection Rules ---
+
+    // FocoFlow Items (Tasks, Projects, etc)
+    match /itens_focoflow/{itemId} {
+      allow get: if isSignedIn() && (existing().uid == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.uid == request.auth.uid || isAdmin());
+      allow create: if isVerified() && isValidId(itemId) && isValidFocoFlowItem(incoming());
+      allow update: if isVerified() && (existing().uid == request.auth.uid || isAdmin()) && 
+                       isValidFocoFlowItem(incoming()) &&
+                       (isImmutable('uid') || isAdmin()) && (isImmutable('criado_em') || isAdmin()) &&
+                       (
+                         // Terminal Lock: Cannot update if already completed/abandoned
+                         !(existing().status in ['completed', 'abandoned']) || isAdmin()
+                       );
+      allow delete: if isVerified() && (existing().uid == request.auth.uid || isAdmin());
+    }
+
+    // Transactions
+    match /transacoes_financeiras_focoflow/{transactionId} {
+      allow get: if isSignedIn() && (existing().uid == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.uid == request.auth.uid || isAdmin());
+      allow create: if isVerified() && isValidId(transactionId) && isValidTransaction(incoming());
+      allow update: if isVerified() && (existing().uid == request.auth.uid || isAdmin()) &&
+                       isValidTransaction(incoming()) &&
+                       (isImmutable('uid') || isAdmin());
+      allow delete: if isVerified() && (existing().uid == request.auth.uid || isAdmin());
+    }
+
+    // User profiles
+    match /Usuarios/{userId} {
+      allow get: if isSignedIn() && (userId == request.auth.uid || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isVerified() && (userId == request.auth.uid || isAdmin());
+      allow update: if isVerified() && (userId == request.auth.uid || isAdmin()) && 
+                       (isImmutable('uid') || isAdmin()) && (isImmutable('email') || isAdmin());
+      
+      match /imagens_geradas/{imageId} {
+        allow read: if isSignedIn() && (userId == request.auth.uid || isAdmin());
+        allow write: if isVerified() && (userId == request.auth.uid || isAdmin());
+      }
+      match /custom_agents/{agentId} {
+        allow read: if isSignedIn() && (userId == request.auth.uid || isAdmin());
+        allow write: if isVerified() && (userId == request.auth.uid || isAdmin());
+      }
+    }
+
+    // Conversations
+    match /conversas/{conversationId} {
+      allow get: if isSignedIn() && (existing().uid == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.uid == request.auth.uid || isAdmin());
+      allow create: if isVerified() && isValidId(conversationId) && (incoming().uid == request.auth.uid || isAdmin());
+      allow update: if isVerified() && (existing().uid == request.auth.uid || isAdmin()) && (isImmutable('uid') || isAdmin());
+      allow delete: if isVerified() && (existing().uid == request.auth.uid || isAdmin());
+
+      match /mensagens/{messageId} {
+        allow read: if isSignedIn() && (get(/databases/$(database)/documents/conversas/$(conversationId)).data.uid == request.auth.uid || isAdmin());
+        allow create: if isVerified() && (get(/databases/$(database)/documents/conversas/$(conversationId)).data.uid == request.auth.uid || isAdmin()) &&
+                         incoming().role in ['user', 'assistant', 'model', 'system'];
+      }
+    }
+
+    // Finance/Shared Rules
+    match /metas_financeiras_focoflow/{id} {
+      allow read: if isSignedIn() && (existing().uid == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.uid == request.auth.uid || isAdmin());
+      allow write: if isVerified() && (resource == null || existing().uid == request.auth.uid || isAdmin()) && (incoming().uid == request.auth.uid || isAdmin());
+    }
+    match /contas_focoflow/{id} {
+      allow read: if isSignedIn() && (existing().uid == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.uid == request.auth.uid || isAdmin());
+      allow write: if isVerified() && (resource == null || existing().uid == request.auth.uid || isAdmin()) && (incoming().uid == request.auth.uid || isAdmin());
+    }
+    match /recorrentes_focoflow/{id} {
+      allow read: if isSignedIn() && (existing().uid == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.uid == request.auth.uid || isAdmin());
+      allow write: if isVerified() && (resource == null || existing().uid == request.auth.uid || isAdmin()) && (incoming().uid == request.auth.uid || isAdmin());
+    }
+    match /terceiros_focoflow/{id} {
+      allow read: if isSignedIn() && (existing().uid == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.uid == request.auth.uid || isAdmin());
+      allow write: if isVerified() && (resource == null || existing().uid == request.auth.uid || isAdmin()) && (incoming().uid == request.auth.uid || isAdmin());
+    }
+
+    // Security and Admin
+    match /authorized_emails/{email} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+    match /security_logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isSignedIn(); 
+      allow update, delete: if false; 
+    }
+    
+    match /system_notifications/{id} {
+      allow read: if isSignedIn() && (existing().targetUserId == request.auth.uid || existing().targetUserId == 'all' || isAdmin());
+      allow write: if isAdmin();
+    }
+
+    match /memoria_atlas/{id} {
+      allow read: if isSignedIn() && (existing().uid == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.uid == request.auth.uid || isAdmin());
+      allow write: if isVerified() && (resource == null || existing().uid == request.auth.uid || isAdmin()) && (incoming().uid == request.auth.uid || isAdmin());
+    }
+  }
+}
